@@ -125,7 +125,8 @@ func runToolProgress(_ path: String, _ args: [String], totalSeconds: Double,
 // 在输出路径前插入进度输出参数（-progress 需在输出文件之前）
 func withProgressArgs(_ args: [String]) -> [String] {
     var a = args
-    a.insert(contentsOf: ["-progress", "pipe:1", "-nostats"], at: max(0, a.count - 1))
+    a.insert(contentsOf: ["-progress", "pipe:1", "-stats_period", "0.2", "-nostats"],
+             at: max(0, a.count - 1))
     return a
 }
 
