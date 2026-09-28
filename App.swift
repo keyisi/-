@@ -913,6 +913,8 @@ struct InsertCoverView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             var okCount = 0
             var failCount = 0
+            var totalElapsed: Double = 0
+            let batchStart = Date()
             for (vi, video) in list.enumerated() {
                 let vName = URL(fileURLWithPath: video).lastPathComponent
                 guard let cover = findCover(forVideo: video, covers: coverList) else {
@@ -926,24 +928,30 @@ struct InsertCoverView: View {
                 }
                 let outDir = currentOutDir(for: video)
                 let cName = URL(fileURLWithPath: cover).lastPathComponent
+                let t0 = Date()
                 let ok = insertCoverToVideo(video, coverPath: cover, outputDir: outDir) { msg in
                     DispatchQueue.main.async { logs.append("[\(vi+1)/\(list.count)] \(msg)") }
                 }
+                let used = Date().timeIntervalSince(t0)
+                if ok { okCount += 1 } else { failCount += 1 }
+                totalElapsed += used
+                let line = ok
+                    ? "[\(vi+1)/\(list.count)] \(vName) ← \(cName) 完成（用时 \(humanDuration(used))）"
+                    : "[\(vi+1)/\(list.count)] \(vName) ✗ 插入失败（用时 \(humanDuration(used))）"
                 DispatchQueue.main.async {
-                    if ok {
-                        okCount += 1
-                        logs.append("[\(vi+1)/\(list.count)] \(vName) ← \(cName) 完成")
-                    } else {
-                        failCount += 1
-                    }
+                    logs.append(line)
                     progressValue = Double(vi + 1) / Double(list.count)
                     currentIdx = vi + 1
                 }
             }
+            let wall = Date().timeIntervalSince(batchStart)
+            let done = okCount, failed = failCount, totalUsed = totalElapsed
+            let summaryText = "插入完成: 成功 \(done) 个, 失败 \(failed) 个 · 总用时 \(humanDuration(wall))"
+                + (done > 0 ? "（平均每个 \(humanDuration(totalUsed / Double(done)))）" : "")
             DispatchQueue.main.async {
                 running = false
-                summary = "插入完成: 成功 \(okCount) 个, 失败 \(failCount) 个"
-                logs.append(summary)
+                summary = summaryText
+                logs.append(summaryText)
             }
         }
     }
@@ -977,8 +985,21 @@ struct EndingView: View {
     @State private var running = false
     @State private var progressValue: Double = 0
     @State private var currentIdx = 0
+    @State private var batchStartAt: Date? = nil
+    @State private var elapsedText = ""
     @State private var logs: [String] = []
     @State private var summary = ""
+
+    // 处理中每 0.5 秒刷新一次已用时
+    private let ticker = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
+    private var progressLabel: String? {
+        guard running else { return nil }
+        var parts: [String] = []
+        if !videos.isEmpty { parts.append("第 \(max(currentIdx, 1))/\(videos.count) 个") }
+        if !elapsedText.isEmpty { parts.append("已用时 \(elapsedText)") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 
     private var sfxExists: Bool { !sfxPath.isEmpty && FileManager.default.fileExists(atPath: sfxPath) }
 
@@ -1215,9 +1236,7 @@ struct EndingView: View {
             }
 
             if running || progressValue > 0 {
-                NiceProgress(value: progressValue,
-                             label: (running && !videos.isEmpty)
-                                ? "第 \(max(currentIdx, 1))/\(videos.count) 个" : nil)
+                NiceProgress(value: progressValue, label: progressLabel)
             }
 
             LogPanel(logs: logs)
@@ -1228,6 +1247,10 @@ struct EndingView: View {
         }
         .onAppear {
             if sfxPath.isEmpty { sfxPath = EndingEngine.defaultSFX }
+        }
+        .onReceive(ticker) { _ in
+            guard running, let t0 = batchStartAt else { return }
+            elapsedText = humanDuration(Date().timeIntervalSince(t0))
         }
     }
 
@@ -1313,6 +1336,8 @@ struct EndingView: View {
         summary = ""
         progressValue = 0
         currentIdx = 0
+        batchStartAt = Date()
+        elapsedText = "0.0 秒"
         // 输出目录: 自定义优先，否则每个视频旁边的「加结尾」文件夹（与「插入封面」一致）
         let customDir = outDirCustom.trimmingCharacters(in: .whitespaces)
         if !s.overwrite {
@@ -1332,6 +1357,8 @@ struct EndingView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             var okCount = 0
             var failCount = 0
+            var totalElapsed: Double = 0
+            let batchStart = Date()
             for (vi, video) in list.enumerated() {
                 let vName = URL(fileURLWithPath: video).lastPathComponent
                 // 每个视频的输出目录: 自定义优先，否则视频旁边的「加结尾」文件夹
@@ -1360,22 +1387,27 @@ struct EndingView: View {
                         logs.append("[\(vi+1)/\(list.count)] \(vName) 未匹配到封面，只做结尾处理")
                     }
                 }
+                let ok = res.success
+                let msg = res.message
+                if ok { okCount += 1 } else { failCount += 1 }
+                totalElapsed += res.elapsed
+                let line = "[\(vi+1)/\(list.count)] \(vName) \(ok ? "✓" : "✗") \(msg)"
                 DispatchQueue.main.async {
-                    if res.success {
-                        okCount += 1
-                        logs.append("[\(vi+1)/\(list.count)] \(vName) ✓ \(res.message)")
-                    } else {
-                        failCount += 1
-                        logs.append("[\(vi+1)/\(list.count)] \(vName) ✗ \(res.message)")
-                    }
+                    logs.append(line)
                     if logs.count > 300 { logs.removeFirst(logs.count - 300) }
                     progressValue = Double(vi + 1) / Double(list.count)
                 }
             }
+            let wall = Date().timeIntervalSince(batchStart)
+            let done = okCount
+            let failed = failCount
+            let totalUsed = totalElapsed
+            let summaryText = "处理完成: 成功 \(done) 个, 失败 \(failed) 个 · 总用时 \(humanDuration(wall))"
+                + (done > 0 ? "（平均每个 \(humanDuration(totalUsed / Double(done)))）" : "")
             DispatchQueue.main.async {
                 running = false
-                summary = "处理完成: 成功 \(okCount) 个, 失败 \(failCount) 个"
-                logs.append(summary)
+                summary = summaryText
+                logs.append(summaryText)
             }
         }
     }

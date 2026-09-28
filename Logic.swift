@@ -373,12 +373,24 @@ struct JobSettings {
     var audioFade: Double = 0        // 原视频音频淡出时长（0=不淡化）
 }
 
+// 耗时格式化: 8.4 秒 / 1 分 23 秒 / 1 小时 02 分
+func humanDuration(_ seconds: Double) -> String {
+    guard seconds.isFinite, seconds >= 0 else { return "-" }
+    if seconds < 60 { return String(format: "%.1f 秒", seconds) }
+    let total = Int(seconds.rounded())
+    let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+    if h > 0 { return String(format: "%d 小时 %02d 分", h, m) }
+    return String(format: "%d 分 %02d 秒", m, s)
+}
+
 struct EndingResult {
     var input: String
     var output: String? = nil
     var total: Double = 0
     var message: String = ""
     var success = false
+    /// 实际处理耗时（秒），仅编码阶段
+    var elapsed: Double = 0
 }
 
 enum EndingEngine {
@@ -521,13 +533,15 @@ enum EndingEngine {
                  "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                  "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out.path]
 
+        let t0 = Date()
         let res = onProgress.map {
             runToolProgress(ffmpegBin(), withProgressArgs(args), totalSeconds: t.total, onProgress: $0)
         } ?? runTool(ffmpegBin(), args)
+        r.elapsed = Date().timeIntervalSince(t0)
         if res.code == 0 {
             onProgress?(1.0)
             r.success = true
-            r.message = String(format: "完成（总长 %.2fs）", t.total)
+            r.message = String(format: "完成（总长 %.2fs，用时 %@）", t.total, humanDuration(r.elapsed))
         } else {
             r.message = "失败：" + String(res.err.suffix(300))
         }
@@ -654,13 +668,15 @@ enum EndingEngine {
               args.count > 4 else {
             r.message = "构建命令失败"; return r
         }
+        let t0 = Date()
         let res = onProgress.map {
             runToolProgress(ffmpegBin(), withProgressArgs(args), totalSeconds: r.total, onProgress: $0)
         } ?? runTool(ffmpegBin(), args)
+        r.elapsed = Date().timeIntervalSince(t0)
         if res.code == 0 {
             onProgress?(1.0)
             r.success = true
-            r.message = String(format: "完成（封面+结尾，总长 %.2fs）", r.total)
+            r.message = String(format: "完成（封面+结尾，总长 %.2fs，用时 %@）", r.total, humanDuration(r.elapsed))
         } else {
             r.message = "失败：" + String(res.err.suffix(300))
         }
