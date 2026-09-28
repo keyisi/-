@@ -976,6 +976,7 @@ struct EndingView: View {
     }
     @State private var running = false
     @State private var progressValue: Double = 0
+    @State private var currentIdx = 0
     @State private var logs: [String] = []
     @State private var summary = ""
 
@@ -1214,7 +1215,9 @@ struct EndingView: View {
             }
 
             if running || progressValue > 0 {
-                NiceProgress(value: progressValue)
+                NiceProgress(value: progressValue,
+                             label: (running && !videos.isEmpty)
+                                ? "第 \(max(currentIdx, 1))/\(videos.count) 个" : nil)
             }
 
             LogPanel(logs: logs)
@@ -1309,6 +1312,7 @@ struct EndingView: View {
         running = true
         summary = ""
         progressValue = 0
+        currentIdx = 0
         // 输出目录: 自定义优先，否则每个视频旁边的「加结尾」文件夹（与「插入封面」一致）
         let customDir = outDirCustom.trimmingCharacters(in: .whitespaces)
         if !s.overwrite {
@@ -1336,13 +1340,22 @@ struct EndingView: View {
                     sv.outputDir = URL(fileURLWithPath: video).deletingLastPathComponent()
                         .appendingPathComponent("加结尾").path
                 }
+                // 实时进度: 整体 = 已完成视频数 + 当前视频内进度
+                let base = Double(vi) / Double(list.count)
+                let span = 1.0 / Double(list.count)
+                let prog: (Double) -> Void = { frac in
+                    DispatchQueue.main.async {
+                        progressValue = min(base + span * max(0, min(frac, 1)), 1)
+                    }
+                }
+                DispatchQueue.main.async { currentIdx = vi + 1 }
                 let res: EndingResult
                 if coverList.isEmpty {
-                    res = EndingEngine.run(input: video, settings: sv)
+                    res = EndingEngine.run(input: video, settings: sv, onProgress: prog)
                 } else if let cover = findCover(forVideo: video, covers: coverList) {
-                    res = EndingEngine.runCombined(input: video, cover: cover, settings: sv)
+                    res = EndingEngine.runCombined(input: video, cover: cover, settings: sv, onProgress: prog)
                 } else {
-                    res = EndingEngine.run(input: video, settings: sv)
+                    res = EndingEngine.run(input: video, settings: sv, onProgress: prog)
                     DispatchQueue.main.async {
                         logs.append("[\(vi+1)/\(list.count)] \(vName) 未匹配到封面，只做结尾处理")
                     }

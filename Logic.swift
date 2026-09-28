@@ -69,6 +69,66 @@ func runTool(_ path: String, _ args: [String]) -> (code: Int32, out: String, err
             String(data: errData, encoding: .utf8) ?? "")
 }
 
+// 带进度的执行: 从 ffmpeg -progress pipe:1 的 stdout 解析 out_time_us 换算百分比
+@discardableResult
+func runToolProgress(_ path: String, _ args: [String], totalSeconds: Double,
+                     onProgress: @escaping (Double) -> Void) -> (code: Int32, out: String, err: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: path)
+    p.arguments = args
+    let outP = Pipe(), errP = Pipe()
+    var errData = Data()
+    let lock = NSLock()
+    var lastEmit = Date.distantPast
+    var lastFrac = 0.0
+    outP.fileHandleForReading.readabilityHandler = { h in
+        let d = h.availableData
+        guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
+        for raw in s.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            let key = String(line[line.startIndex..<eq])
+            // ffmpeg 的 out_time_us 与 out_time_ms 都是微秒
+            guard key == "out_time_us" || key == "out_time_ms" else { continue }
+            let valStr = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            guard let us = Double(valStr), us >= 0, totalSeconds > 0 else { continue }
+            let frac = min(us / 1_000_000.0 / totalSeconds, 1.0)
+            lock.lock()
+            let now = Date()
+            let due = frac - lastFrac >= 0.005 || now.timeIntervalSince(lastEmit) >= 0.25
+            if due { lastFrac = frac; lastEmit = now }
+            lock.unlock()
+            if due { onProgress(frac) }
+        }
+    }
+    errP.fileHandleForReading.readabilityHandler = { h in
+        let d = h.availableData
+        if !d.isEmpty { errData.append(d) }
+    }
+    p.standardOutput = outP
+    p.standardError = errP
+    // 同 runTool: stdin 必须指向 /dev/null，否则继承 pty 会被进程监控杀掉
+    p.standardInput = FileHandle.nullDevice
+    do {
+        try p.run()
+    } catch {
+        return (-1, "", error.localizedDescription)
+    }
+    p.waitUntilExit()
+    outP.fileHandleForReading.readabilityHandler = nil
+    errP.fileHandleForReading.readabilityHandler = nil
+    _ = outP.fileHandleForReading.readDataToEndOfFile()
+    errData.append(errP.fileHandleForReading.readDataToEndOfFile())
+    return (p.terminationStatus, "", String(data: errData, encoding: .utf8) ?? "")
+}
+
+// 在输出路径前插入进度输出参数（-progress 需在输出文件之前）
+func withProgressArgs(_ args: [String]) -> [String] {
+    var a = args
+    a.insert(contentsOf: ["-progress", "pipe:1", "-nostats"], at: max(0, a.count - 1))
+    return a
+}
+
 func probeDuration(_ videoPath: String) -> Double? {
     let r = runTool(ffprobeBin(), ["-v", "error", "-show_entries", "format=duration",
                                    "-of", "default=nw=1:nk=1", videoPath])
@@ -430,7 +490,8 @@ enum EndingEngine {
     }
 
     @discardableResult
-    static func run(input: String, settings s: JobSettings) -> EndingResult {
+    static func run(input: String, settings s: JobSettings,
+                    onProgress: ((Double) -> Void)? = nil) -> EndingResult {
         var r = EndingResult(input: input)
         guard isVideo(input) else { r.message = "不支持的格式"; return r }
         guard let dur = probeDuration(input), dur > s.fadeOut + 0.1 else {
@@ -459,8 +520,11 @@ enum EndingEngine {
                  "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                  "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out.path]
 
-        let res = runTool(ffmpegBin(), args)
+        let res = onProgress.map {
+            runToolProgress(ffmpegBin(), withProgressArgs(args), totalSeconds: t.total, onProgress: $0)
+        } ?? runTool(ffmpegBin(), args)
         if res.code == 0 {
+            onProgress?(1.0)
             r.success = true
             r.message = String(format: "完成（总长 %.2fs）", t.total)
         } else {
@@ -555,7 +619,8 @@ enum EndingEngine {
     }
 
     @discardableResult
-    static func runCombined(input: String, cover: String, settings s: JobSettings) -> EndingResult {
+    static func runCombined(input: String, cover: String, settings s: JobSettings,
+                            onProgress: ((Double) -> Void)? = nil) -> EndingResult {
         var r = EndingResult(input: input)
         guard isVideo(input) else { r.message = "不支持的格式"; return r }
         guard FileManager.default.fileExists(atPath: cover) else {
@@ -588,8 +653,11 @@ enum EndingEngine {
               args.count > 4 else {
             r.message = "构建命令失败"; return r
         }
-        let res = runTool(ffmpegBin(), args)
+        let res = onProgress.map {
+            runToolProgress(ffmpegBin(), withProgressArgs(args), totalSeconds: r.total, onProgress: $0)
+        } ?? runTool(ffmpegBin(), args)
         if res.code == 0 {
+            onProgress?(1.0)
             r.success = true
             r.message = String(format: "完成（封面+结尾，总长 %.2fs）", r.total)
         } else {
