@@ -1137,7 +1137,7 @@ struct EndingView: View {
                     NiceField("后缀", text: $suffix, width: 90, disabled: running || !rename)
                     Text(rename
                          ? "→ 原名\((suffix.isEmpty ? "定格白场" : suffix)).mp4"
-                         : "→ 保持原文件名（不可与源文件同目录同名）")
+                         : "→ 保持原文件名（默认输出到「加结尾」文件夹）")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.tertiary)
                     Spacer()
@@ -1147,7 +1147,7 @@ struct EndingView: View {
                 }
                 HStack(spacing: 8) {
                     FieldLabel("folder", "输出目录")
-                    NiceField("默认: 每个视频旁边", text: $outDirCustom, disabled: running)
+                    NiceField("默认: 每个视频旁边的「加结尾」文件夹", text: $outDirCustom, disabled: running)
                     Button {
                         pickOutDir()
                     } label: {
@@ -1309,28 +1309,40 @@ struct EndingView: View {
         running = true
         summary = ""
         progressValue = 0
+        // 输出目录: 自定义优先，否则每个视频旁边的「加结尾」文件夹（与「插入封面」一致）
+        let customDir = outDirCustom.trimmingCharacters(in: .whitespaces)
         if !s.overwrite {
-            try? FileManager.default.createDirectory(
-                atPath: s.outputDir ?? URL(fileURLWithPath: list[0]).deletingLastPathComponent().path,
-                withIntermediateDirectories: true)
+            let dirs = customDir.isEmpty
+                ? Set(list.map { URL(fileURLWithPath: $0).deletingLastPathComponent().appendingPathComponent("加结尾").path })
+                : [customDir]
+            for d in dirs {
+                try? FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true)
+            }
         }
         let modeText = coverList.isEmpty ? "结尾处理" : "封面+结尾（一次编码）"
         logs = ["开始\(modeText) \(list.count) 个视频：渐白 \(s.fadeOut)秒 / 全白保持 \(s.whiteHold)秒 / 渐显 \(s.fadeIn)秒 / 定格 \(s.freeze)秒，音效：\(s.sfxPath ?? "无")" +
                 (s.audioFade > 0 ? "，原视频音频淡出 \(s.audioFade)秒" : "") +
-                (coverList.isEmpty ? "" : "，封面 \(coverList.count) 张按集数匹配")]
+                (coverList.isEmpty ? "" : "，封面 \(coverList.count) 张按集数匹配") +
+                (customDir.isEmpty ? "，输出到每个视频旁的「加结尾」文件夹" : "，输出到 \(customDir)")]
 
         DispatchQueue.global(qos: .userInitiated).async {
             var okCount = 0
             var failCount = 0
             for (vi, video) in list.enumerated() {
                 let vName = URL(fileURLWithPath: video).lastPathComponent
+                // 每个视频的输出目录: 自定义优先，否则视频旁边的「加结尾」文件夹
+                var sv = s
+                if customDir.isEmpty {
+                    sv.outputDir = URL(fileURLWithPath: video).deletingLastPathComponent()
+                        .appendingPathComponent("加结尾").path
+                }
                 let res: EndingResult
                 if coverList.isEmpty {
-                    res = EndingEngine.run(input: video, settings: s)
+                    res = EndingEngine.run(input: video, settings: sv)
                 } else if let cover = findCover(forVideo: video, covers: coverList) {
-                    res = EndingEngine.runCombined(input: video, cover: cover, settings: s)
+                    res = EndingEngine.runCombined(input: video, cover: cover, settings: sv)
                 } else {
-                    res = EndingEngine.run(input: video, settings: s)
+                    res = EndingEngine.run(input: video, settings: sv)
                     DispatchQueue.main.async {
                         logs.append("[\(vi+1)/\(list.count)] \(vName) 未匹配到封面，只做结尾处理")
                     }
