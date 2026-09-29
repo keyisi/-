@@ -608,6 +608,7 @@ struct InsertCoverView: View {
     private var videos: [String] { videosRaw.isEmpty ? [] : videosRaw.components(separatedBy: "\n") }
     private var covers: [String] { coversRaw.isEmpty ? [] : coversRaw.components(separatedBy: "\n") }
     @State private var running = false
+    @State private var stopping = false
     @State private var progressValue: Double = 0
     @State private var currentIdx = 0
     @State private var logs: [String] = []
@@ -766,10 +767,32 @@ struct InsertCoverView: View {
                 .buttonStyle(.plain)
                 .disabled(!canInsert)
 
+                if running {
+                    Button {
+                        stopInsert()
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: "stop.fill").font(.system(size: 10.5, weight: .bold))
+                            Text(stopping ? "正在停止…" : "停止处理")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 9)
+                        .foregroundStyle(.white)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9)
+                                .fill(Theme.warn.opacity(stopping ? 0.45 : 0.95))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(stopping)
+                    .help("立即停止：已完成的视频保留，未处理的跳过，半成品自动清理")
+                }
+
                 if !summary.isEmpty {
                     Text(summary)
                         .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(Theme.ok)
+                        .foregroundStyle(summary.hasPrefix("已停止") ? Theme.warn : Theme.ok)
                         .lineLimit(1)
                 }
                 Spacer()
@@ -900,9 +923,11 @@ struct InsertCoverView: View {
         let list = videos
         let coverList = covers
         running = true
+        stopping = false
         summary = ""
         progressValue = 0
         currentIdx = 0
+        RunControl.shared.begin()
         let customDir = outDirCustom.trimmingCharacters(in: .whitespaces)
         if !customDir.isEmpty {
             try? FileManager.default.createDirectory(atPath: customDir, withIntermediateDirectories: true)
@@ -914,8 +939,11 @@ struct InsertCoverView: View {
             var okCount = 0
             var failCount = 0
             var totalElapsed: Double = 0
+            var stopped = false
             let batchStart = Date()
             for (vi, video) in list.enumerated() {
+                // 用户点了「停止处理」→ 跳出剩余任务
+                if RunControl.shared.isCancelled { stopped = true; break }
                 let vName = URL(fileURLWithPath: video).lastPathComponent
                 guard let cover = findCover(forVideo: video, covers: coverList) else {
                     failCount += 1
@@ -933,6 +961,8 @@ struct InsertCoverView: View {
                     DispatchQueue.main.async { logs.append("[\(vi+1)/\(list.count)] \(msg)") }
                 }
                 let used = Date().timeIntervalSince(t0)
+                // 被停止：函数内已记录日志，这里不再计成功/失败，直接跳出
+                if RunControl.shared.isCancelled { stopped = true; break }
                 if ok { okCount += 1 } else { failCount += 1 }
                 totalElapsed += used
                 let line = ok
@@ -946,14 +976,31 @@ struct InsertCoverView: View {
             }
             let wall = Date().timeIntervalSince(batchStart)
             let done = okCount, failed = failCount, totalUsed = totalElapsed
-            let summaryText = "插入完成: 成功 \(done) 个, 失败 \(failed) 个 · 总用时 \(humanDuration(wall))"
-                + (done > 0 ? "（平均每个 \(humanDuration(totalUsed / Double(done)))）" : "")
+            let wasStopped = stopped
+            let summaryText: String
+            if wasStopped {
+                let rest = max(list.count - done - failed, 0)
+                summaryText = "已停止: 完成 \(done) 个，剩余 \(rest) 个未处理 · 已用时 \(humanDuration(wall))"
+            } else {
+                summaryText = "插入完成: 成功 \(done) 个, 失败 \(failed) 个 · 总用时 \(humanDuration(wall))"
+                    + (done > 0 ? "（平均每个 \(humanDuration(totalUsed / Double(done)))）" : "")
+            }
             DispatchQueue.main.async {
                 running = false
+                stopping = false
+                RunControl.shared.reset()
                 summary = summaryText
                 logs.append(summaryText)
             }
         }
+    }
+
+    /// 停止插入：终止当前编码进程，剩余视频不再处理（已完成的输出保留）
+    func stopInsert() {
+        guard running, !stopping else { return }
+        stopping = true
+        logs.append("正在停止…（等待当前视频的编码进程退出，已完成的不受影响）")
+        RunControl.shared.cancel()
     }
 }
 
@@ -986,6 +1033,7 @@ struct EndingView: View {
         videos.filter { findCover(forVideo: $0, covers: covers) != nil }.count
     }
     @State private var running = false
+    @State private var stopping = false
     @State private var progressValue: Double = 0
     @State private var currentIdx = 0
     @State private var batchStartAt: Date? = nil
@@ -1001,6 +1049,7 @@ struct EndingView: View {
         var parts: [String] = []
         if !videos.isEmpty { parts.append("第 \(max(currentIdx, 1))/\(videos.count) 个") }
         if !elapsedText.isEmpty { parts.append("已用时 \(elapsedText)") }
+        if stopping { parts.append("正在停止…") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
@@ -1236,10 +1285,32 @@ struct EndingView: View {
                 .buttonStyle(.plain)
                 .disabled(!canStart)
 
+                if running {
+                    Button {
+                        stop()
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: "stop.fill").font(.system(size: 10.5, weight: .bold))
+                            Text(stopping ? "正在停止…" : "停止处理")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 9)
+                        .foregroundStyle(.white)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9)
+                                .fill(Theme.warn.opacity(stopping ? 0.45 : 0.95))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(stopping)
+                    .help("立即停止：已完成的视频保留，未处理的跳过，半成品自动清理")
+                }
+
                 if !summary.isEmpty {
                     Text(summary)
                         .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(Theme.ok)
+                        .foregroundStyle(summary.hasPrefix("已停止") ? Theme.warn : Theme.ok)
                         .lineLimit(1)
                 }
                 Spacer()
@@ -1357,11 +1428,13 @@ struct EndingView: View {
         let coverList = covers
         let s = settings
         running = true
+        stopping = false
         summary = ""
         progressValue = 0
         currentIdx = 0
         batchStartAt = Date()
         elapsedText = "0.0 秒"
+        RunControl.shared.begin()
         // 输出目录: 自定义优先，否则每个视频旁边的「加结尾」文件夹（与「插入封面」一致）
         let customDir = outDirCustom.trimmingCharacters(in: .whitespaces)
         if !s.overwrite {
@@ -1383,8 +1456,11 @@ struct EndingView: View {
             var okCount = 0
             var failCount = 0
             var totalElapsed: Double = 0
+            var stopped = false
             let batchStart = Date()
             for (vi, video) in list.enumerated() {
+                // 用户点了「停止处理」→ 跳出剩余任务
+                if RunControl.shared.isCancelled { stopped = true; break }
                 let vName = URL(fileURLWithPath: video).lastPathComponent
                 // 每个视频的输出目录: 自定义优先，否则视频旁边的「加结尾」文件夹
                 var sv = s
@@ -1412,6 +1488,13 @@ struct EndingView: View {
                         logs.append("[\(vi+1)/\(list.count)] \(vName) 未匹配到封面，只做结尾处理")
                     }
                 }
+                if res.cancelled {
+                    stopped = true
+                    DispatchQueue.main.async {
+                        logs.append("[\(vi+1)/\(list.count)] \(vName) ⊘ 已停止")
+                    }
+                    break
+                }
                 let ok = res.success
                 let msg = res.message
                 if ok { okCount += 1 } else { failCount += 1 }
@@ -1427,14 +1510,31 @@ struct EndingView: View {
             let done = okCount
             let failed = failCount
             let totalUsed = totalElapsed
-            let summaryText = "处理完成: 成功 \(done) 个, 失败 \(failed) 个 · 总用时 \(humanDuration(wall))"
-                + (done > 0 ? "（平均每个 \(humanDuration(totalUsed / Double(done)))）" : "")
+            let wasStopped = stopped
+            let summaryText: String
+            if wasStopped {
+                let rest = max(list.count - done - failed, 0)
+                summaryText = "已停止: 完成 \(done) 个，剩余 \(rest) 个未处理 · 已用时 \(humanDuration(wall))"
+            } else {
+                summaryText = "处理完成: 成功 \(done) 个, 失败 \(failed) 个 · 总用时 \(humanDuration(wall))"
+                    + (done > 0 ? "（平均每个 \(humanDuration(totalUsed / Double(done)))）" : "")
+            }
             DispatchQueue.main.async {
                 running = false
+                stopping = false
+                RunControl.shared.reset()
                 summary = summaryText
                 logs.append(summaryText)
             }
         }
+    }
+
+    /// 停止处理：终止当前编码进程，剩余视频不再处理（已完成的输出保留）
+    func stop() {
+        guard running, !stopping else { return }
+        stopping = true
+        logs.append("正在停止…（等待当前视频的编码进程退出，已完成的不受影响）")
+        RunControl.shared.cancel()
     }
 }
 

@@ -35,6 +35,61 @@ func toolPath(_ name: String) -> String {
 func ffmpegBin() -> String { toolPath("ffmpeg") }
 func ffprobeBin() -> String { toolPath("ffprobe") }
 
+// MARK: - 全局运行控制（支持用户中途「停止处理」）
+
+/// 登记当前正在跑的 ffmpeg/ffprobe 进程，并携带一个取消标志。
+/// 界面上点「停止」→ cancel() 终止当前进程，调用方的循环检测 isCancelled 后跳出。
+final class RunControl {
+    static let shared = RunControl()
+    private let lock = NSLock()
+    private var current: Process?
+    private var _cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _cancelled
+    }
+
+    /// 一批任务开始前调用：清掉上一次的取消状态
+    func begin() {
+        lock.lock(); _cancelled = false; current = nil; lock.unlock()
+    }
+
+    /// 登记正在运行的子进程
+    func register(_ p: Process) {
+        lock.lock()
+        // 若在启动瞬间已被取消，立刻终止这个进程（避免漏杀）
+        let killed = _cancelled
+        current = p
+        lock.unlock()
+        if killed && p.isRunning { p.terminate() }
+    }
+
+    func finish(_ p: Process) {
+        lock.lock()
+        if current === p { current = nil }
+        lock.unlock()
+    }
+
+    /// 请求停止：先温和 terminate，0.5 秒后仍存活则 SIGKILL 兜底（半成品由调用方清理）
+    func cancel() {
+        lock.lock()
+        _cancelled = true
+        let p = current
+        lock.unlock()
+        guard let proc = p, proc.isRunning else { return }
+        proc.terminate()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+            if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+        }
+    }
+
+    /// 一批任务结束后复位
+    func reset() {
+        lock.lock(); _cancelled = false; current = nil; lock.unlock()
+    }
+}
+
 @discardableResult
 func runTool(_ path: String, _ args: [String]) -> (code: Int32, out: String, err: String) {
     let p = Process()
@@ -59,7 +114,9 @@ func runTool(_ path: String, _ args: [String]) -> (code: Int32, out: String, err
     } catch {
         return (-1, "", error.localizedDescription)
     }
+    RunControl.shared.register(p)
     p.waitUntilExit()
+    RunControl.shared.finish(p)
     outP.fileHandleForReading.readabilityHandler = nil
     errP.fileHandleForReading.readabilityHandler = nil
     outData.append(outP.fileHandleForReading.readDataToEndOfFile())
@@ -114,7 +171,9 @@ func runToolProgress(_ path: String, _ args: [String], totalSeconds: Double,
     } catch {
         return (-1, "", error.localizedDescription)
     }
+    RunControl.shared.register(p)
     p.waitUntilExit()
+    RunControl.shared.finish(p)
     outP.fileHandleForReading.readabilityHandler = nil
     errP.fileHandleForReading.readabilityHandler = nil
     _ = outP.fileHandleForReading.readDataToEndOfFile()
@@ -353,7 +412,13 @@ func insertCoverToVideo(_ videoPath: String, coverPath: String, outputDir: Strin
 
     let r = runTool(ffmpegBin(), args)
     guard r.code == 0 else {
-        log("失败: \(String(r.err.suffix(200)))"); return false
+        if RunControl.shared.isCancelled {
+            try? fm.removeItem(at: outURL)
+            log("已停止（未完成，已清理半成品）")
+        } else {
+            log("失败: \(String(r.err.suffix(200)))")
+        }
+        return false
     }
     return true
 }
@@ -420,6 +485,8 @@ struct EndingResult {
     var success = false
     /// 实际处理耗时（秒），仅编码阶段
     var elapsed: Double = 0
+    /// 是否被用户中途停止（不计入失败）
+    var cancelled = false
 }
 
 enum EndingEngine {
@@ -536,6 +603,11 @@ enum EndingEngine {
                     onProgress: ((Double) -> Void)? = nil) -> EndingResult {
         var r = EndingResult(input: input)
         guard isVideo(input) else { r.message = "不支持的格式"; return r }
+        if RunControl.shared.isCancelled {
+            r.cancelled = true
+            r.message = "已停止"
+            return r
+        }
         guard let dur = probeDuration(input), dur > s.fadeOut + 0.1 else {
             r.message = "读取视频时长失败"; return r
         }
@@ -571,6 +643,10 @@ enum EndingEngine {
             onProgress?(1.0)
             r.success = true
             r.message = String(format: "完成（总长 %.2fs，用时 %@）", t.total, humanDuration(r.elapsed))
+        } else if RunControl.shared.isCancelled {
+            r.cancelled = true
+            r.message = "已停止（未完成，已清理半成品）"
+            try? FileManager.default.removeItem(at: out)
         } else {
             r.message = "失败：" + String(res.err.suffix(300))
         }
@@ -667,6 +743,11 @@ enum EndingEngine {
                             onProgress: ((Double) -> Void)? = nil) -> EndingResult {
         var r = EndingResult(input: input)
         guard isVideo(input) else { r.message = "不支持的格式"; return r }
+        if RunControl.shared.isCancelled {
+            r.cancelled = true
+            r.message = "已停止"
+            return r
+        }
         guard FileManager.default.fileExists(atPath: cover) else {
             r.message = "找不到封面图"; return r
         }
@@ -706,6 +787,10 @@ enum EndingEngine {
             onProgress?(1.0)
             r.success = true
             r.message = String(format: "完成（封面+结尾，总长 %.2fs，用时 %@）", r.total, humanDuration(r.elapsed))
+        } else if RunControl.shared.isCancelled {
+            r.cancelled = true
+            r.message = "已停止（未完成，已清理半成品）"
+            try? FileManager.default.removeItem(at: out)
         } else {
             r.message = "失败：" + String(res.err.suffix(300))
         }
