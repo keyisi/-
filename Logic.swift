@@ -1420,11 +1420,9 @@ func buildPlan(folder origFolder: URL, title: String, organize: Bool, srtEPName:
                     append(child, dest.appendingPathComponent(nameFor(digits: p.digits, ext: "srt", original: base)), .rename)
                 }
             } else if isVideoExt(p.ext) {
-                if organize {
-                    // 带 (N) 副本标记的 → 纯净；普通 → 成片
-                    let kind: ItemKind = p.copy != nil ? .clean : .main
-                    let sub = kind == .clean ? cats.clean : cats.main
-                    append(child, dest.appendingPathComponent("\(sub)/\(nameFor(digits: p.digits, ext: p.ext, original: base))"), kind)
+                if organize, p.copy != nil {
+                    // 带 (N) 副本标记的 → 纯净；普通视频原地改名（不再生成「成片」文件夹）
+                    append(child, dest.appendingPathComponent("\(cats.clean)/\(nameFor(digits: p.digits, ext: p.ext, original: base))"), .clean)
                 } else {
                     append(child, dest.appendingPathComponent(nameFor(digits: p.digits, ext: p.ext, original: base)), .rename)
                 }
@@ -1690,7 +1688,7 @@ func organizerCLI() -> Never {
     func usage() {
         print("""
         用法: 短剧整理助手 --cli <文件夹> "<剧名>" [选项]
-          --organize       整理为三个分类夹（默认 字幕/纯净/成片）
+          --organize       字幕→字幕夹、带(N)副本→纯净夹；普通视频原地改名（不生成成片夹）
           --cats a,b,c     自定义三个分类夹名称（顺序：字幕,纯净,成片）
           --template T     命名模板，占位符：{剧名} {序号} {日期} {时间} {原名} {扩展名}
           --srt-ep         字幕也按模板/EPxx 命名（默认保留原名）

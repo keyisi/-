@@ -19,6 +19,15 @@
 	</dict>
 	<key>files2</key>
 	<dict>
+		<key>MacOS/Video Post-Production</key>
+		<dict>
+			<key>cdhash</key>
+			<data>
+			f0x1wOyMCcFEPw0clSgvDa8FrUY=
+			</data>
+			<key>requirement</key>
+			<string>cdhash H"7f4c75c0ec8c09c1443f0d1c95282f0daf05ad46"</string>
+		</dict>
 		<key>Resources/AppIcon.icns</key>
 		<dict>
 			<key>hash2</key>

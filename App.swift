@@ -1595,8 +1595,6 @@ struct OrganizerView: View {
     @State private var title: String = ""
     // 整理为分类夹：默认开启（原开关已按需求移除）
     private let organize = true
-    @State private var srtEPName: Bool = false
-    @State private var overwrite: Bool = false
 
     // 命名模板
     @State private var template: String = AppSettings.fallback.template
@@ -1680,13 +1678,6 @@ struct OrganizerView: View {
                     .foregroundStyle(Theme.accent)
                     .help("查看可用占位符")
                     Spacer()
-                }
-                HStack(spacing: 14) {
-                    Toggle("字幕也按模板命名", isOn: $srtEPName).toggleStyle(.checkbox)
-                        .font(.system(size: 11))
-                        .onChange(of: srtEPName) { _ in scheduleScan() }
-                    Toggle("覆盖已存在的目标（旧文件进废纸篓）", isOn: $overwrite).toggleStyle(.checkbox)
-                        .font(.system(size: 11))
                 }
             }
 
@@ -1945,13 +1936,12 @@ struct OrganizerView: View {
         busy = true; logs = []; executed = false
         persistSettings()
         let org = organize
-        let srt = srtEPName
         let t = title
         let tpl = template
         let cats = currentCats
         let out = currentOutput
         DispatchQueue.global(qos: .userInitiated).async {
-            let r = buildPlan(folder: folder, title: t, organize: org, srtEPName: srt,
+            let r = buildPlan(folder: folder, title: t, organize: org, srtEPName: false,
                               template: tpl, cats: cats, outputFolder: out)
             DispatchQueue.main.async {
                 plan = r.items
@@ -1966,14 +1956,13 @@ struct OrganizerView: View {
         guard !plan.isEmpty, !blocked, let folder = folderURL else { return }
         busy = true
         let snapshot = plan
-        let ov = overwrite
         let org = organize
         let t = title
         let tpl = template
         let cats = currentCats
         let out = currentOutput
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = executePlan(snapshot, overwrite: ov)
+            let result = executePlan(snapshot, overwrite: false)
             recordBatch(folder: folder, title: t, moves: result.moves)
             var empties: [URL] = []
             if org { empties = findEmptyFolders(in: folder, cats: cats) }
@@ -1983,7 +1972,7 @@ struct OrganizerView: View {
                 executed = true
                 canUndo = !result.moves.isEmpty
                 // 重新扫描一次，反映最新状态
-                let r = buildPlan(folder: folder, title: t, organize: org, srtEPName: srtEPName,
+                let r = buildPlan(folder: folder, title: t, organize: org, srtEPName: false,
                                   template: tpl, cats: cats, outputFolder: out)
                 plan = r.items
                 notes = r.notes
