@@ -975,6 +975,9 @@ struct EndingView: View {
     @AppStorage("fxt_endLocked") private var locked = false
     @AppStorage("fxt_endAFade") private var audioFadeOn = false
     @AppStorage("fxt_endAFadeDur") private var audioFadeDurText = "0.5"
+    @AppStorage("fxt_endSpeed") private var encSpeed = EncodeSpeed.fast.rawValue
+
+    private var currentSpeed: EncodeSpeed { EncodeSpeed(rawValue: encSpeed) ?? .fast }
 
     private var videos: [String] { videosRaw.isEmpty ? [] : videosRaw.components(separatedBy: "\n") }
     private var covers: [String] { coversRaw.isEmpty ? [] : coversRaw.components(separatedBy: "\n") }
@@ -1024,6 +1027,7 @@ struct EndingView: View {
         s.outputDir = custom.isEmpty ? nil : custom
         s.sfxPath = sfxExists ? sfxPath : nil
         s.audioFade = audioFadeOn ? max(0.05, parseNum(audioFadeDurText, fallback: 0.5)) : 0
+        s.speed = currentSpeed
         return s
     }
 
@@ -1146,6 +1150,26 @@ struct EndingView: View {
                     .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.1)))
                     .disabled(running)
                     .help("选择音效文件")
+                }
+            }
+
+            // 3.5 编码速度
+            Card {
+                FieldLabel("speedometer", "编码速度")
+                HStack(spacing: 10) {
+                    Picker("", selection: $encSpeed) {
+                        ForEach(EncodeSpeed.allCases, id: \.rawValue) { sp in
+                            Text(sp.label).tag(sp.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 140)
+                    .disabled(running)
+                    Text(currentSpeed.hint)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
                 }
             }
 
@@ -1352,6 +1376,7 @@ struct EndingView: View {
         logs = ["开始\(modeText) \(list.count) 个视频：渐白 \(s.fadeOut)秒 / 全白保持 \(s.whiteHold)秒 / 渐显 \(s.fadeIn)秒 / 定格 \(s.freeze)秒，音效：\(s.sfxPath ?? "无")" +
                 (s.audioFade > 0 ? "，原视频音频淡出 \(s.audioFade)秒" : "") +
                 (coverList.isEmpty ? "" : "，封面 \(coverList.count) 张按集数匹配") +
+                "，编码 \(s.speed.label)" +
                 (customDir.isEmpty ? "，输出到每个视频旁的「加结尾」文件夹" : "，输出到 \(customDir)")]
 
         DispatchQueue.global(qos: .userInitiated).async {
