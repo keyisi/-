@@ -366,6 +366,7 @@ func extractCover(_ videoPath: String, outputDir: String, outName: String,
 // ---------- 插入封面: 封面按集数匹配视频, 插到视频最开头占 1 帧 ----------
 
 func insertCoverToVideo(_ videoPath: String, coverPath: String, outputDir: String,
+                        sizeMode: SizeMode = .match,
                         log: @escaping (String) -> Void) -> Bool {
     let fm = FileManager.default
     guard fm.fileExists(atPath: videoPath) else {
@@ -407,8 +408,8 @@ func insertCoverToVideo(_ videoPath: String, coverPath: String, outputDir: Strin
     } else {
         args += ["-an"]
     }
-    args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-             "-pix_fmt", "yuv420p", "-movflags", "+faststart", outURL.path]
+    args += EncodeSpeed.fast.videoArgs(targetBitRate: targetVideoKbps(videoPath, sizeMode: sizeMode))
+    args += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", outURL.path]
 
     let r = runTool(ffmpegBin(), args)
     guard r.code == 0 else {
@@ -439,18 +440,79 @@ enum EncodeSpeed: String, CaseIterable {
 
     var hint: String {
         switch self {
-        case .standard: return "x264 medium · 体积略小，编码较慢"
-        case .fast: return "x264 veryfast · 速度约快 1.7 倍，画质基本一致"
+        case .standard: return "x264 medium · 编码较慢"
+        case .fast: return "x264 veryfast · 速度约快 1.7 倍"
+        }
+    }
+
+    var preset: String {
+        switch self {
+        case .standard: return "medium"
+        case .fast: return "veryfast"
         }
     }
 
     // 视频编码参数（插入到 -c:a 之前）
-    var videoArgs: [String] {
+    // targetBitRate = nil → CRF 18（高画质）；否则单遍 ABR 打目标码率并限制峰值
+    func videoArgs(targetBitRate kbps: Int? = nil) -> [String] {
+        if let k = kbps, k > 0 {
+            return ["-c:v", "libx264", "-preset", preset,
+                    "-b:v", "\(k)k",
+                    "-maxrate", "\(k * 16 / 10)k",
+                    "-bufsize", "\(k * 24 / 10)k"]
+        }
+        return ["-c:v", "libx264", "-preset", preset, "-crf", "18"]
+    }
+}
+
+// 输出体积档位
+enum SizeMode: String, CaseIterable {
+    case match = "match"   // 跟随原片（默认）：按源视频码率编码，输出体积≈源
+    case high = "high"     // 高画质：x264 CRF 18，体积可能明显大于源
+
+    var label: String {
         switch self {
-        case .standard: return ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
-        case .fast: return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+        case .match: return "跟随原片"
+        case .high: return "高画质"
         }
     }
+
+    var hint: String {
+        switch self {
+        case .match: return "按原视频码率编码 · 体积与原片基本一致"
+        case .high: return "CRF 18 画质优先 · 体积可能远大于原片"
+        }
+    }
+}
+
+/// 源视频的视频流码率（bps）：优先取流自身码率，缺失则用容器总码率减音频码率
+func probeVideoBitRate(_ path: String) -> Double? {
+    func num(_ r: (code: Int32, out: String, err: String)) -> Double? {
+        guard r.code == 0 else { return nil }
+        return Double(r.out.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    let rv = runTool(ffprobeBin(), ["-v", "error", "-select_streams", "v:0",
+                                    "-show_entries", "stream=bit_rate",
+                                    "-of", "default=nw=1:nk=1", path])
+    if let v = num(rv), v > 50_000 { return v }
+
+    let rt = runTool(ffprobeBin(), ["-v", "error", "-show_entries", "format=bit_rate",
+                                    "-of", "default=nw=1:nk=1", path])
+    guard let total = num(rt), total > 50_000 else { return nil }
+    let ra = runTool(ffprobeBin(), ["-v", "error", "-select_streams", "a:0",
+                                    "-show_entries", "stream=bit_rate",
+                                    "-of", "default=nw=1:nk=1", path])
+    let audio = num(ra) ?? 128_000
+    return max(total - audio, 200_000)
+}
+
+/// 「跟随原片」时的目标视频码率（kbps）；返回 nil 表示走 CRF 高画质
+func targetVideoKbps(_ input: String, sizeMode: SizeMode) -> Int? {
+    guard sizeMode == .match else { return nil }
+    let src = probeVideoBitRate(input) ?? 2_500_000
+    // 夹在 900k ~ 20M 之间，避免异常源（超低/超高码率）编出离谱结果
+    let clamped = min(max(src, 900_000), 20_000_000)
+    return Int((clamped / 1000).rounded())
 }
 
 struct JobSettings {
@@ -465,6 +527,7 @@ struct JobSettings {
     var sfxPath: String? = nil
     var audioFade: Double = 0        // 原视频音频淡出时长（0=不淡化）
     var speed: EncodeSpeed = .fast   // 编码速度档位
+    var sizeMode: SizeMode = .match  // 输出体积档位（默认跟随原片）
 }
 
 // 耗时格式化: 8.4 秒 / 1 分 23 秒 / 1 小时 02 分
@@ -592,7 +655,7 @@ enum EndingEngine {
         if useSFX { parts += ["-i", shellQuoted(sfx)] }
         parts += ["-filter_complex", shellQuoted(fc),
                   "-map", "[v]", "-map", "[a]"]
-        parts += s.speed.videoArgs
+        parts += s.speed.videoArgs(targetBitRate: targetVideoKbps(input, sizeMode: s.sizeMode))
         parts += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
                   "-y", shellQuoted(out.path)]
         return parts.joined(separator: " ")
@@ -631,7 +694,7 @@ enum EndingEngine {
         var args = ["-hide_banner", "-loglevel", "error", "-y", "-i", input]
         if useSFX { args += ["-i", sfx] }
         args += ["-filter_complex", fc, "-map", "[v]", "-map", "[a]"]
-        args += s.speed.videoArgs
+        args += s.speed.videoArgs(targetBitRate: targetVideoKbps(input, sizeMode: s.sizeMode))
         args += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out.path]
 
         let t0 = Date()
@@ -706,7 +769,7 @@ enum EndingEngine {
                     "-loop", "1", "-framerate", "\(fps)", "-t", String(still), "-i", cover]
         if useSFX { args += ["-i", sfx] }
         args += ["-filter_complex", fc, "-map", "[v]", "-map", "[a]"]
-        args += s.speed.videoArgs
+        args += s.speed.videoArgs(targetBitRate: targetVideoKbps(input, sizeMode: s.sizeMode))
         args += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out.path]
         return args
     }
@@ -891,7 +954,7 @@ func cliMain() {
         }
     }
     // 结尾处理模式: --ending <视频或目录...> [--sfx 路径] [--fade-out 秒] [--hold 秒] [--fade-in 秒]
-    //              [--freeze 秒] [--sfx-offset 秒] [--afade 秒] [--speed fast|standard] [--suffix 后缀] [-o 目录] [--overwrite] [--print-cmd]
+    //              [--freeze 秒] [--sfx-offset 秒] [--afade 秒] [--speed fast|standard] [--size match|high] [--suffix 后缀] [-o 目录] [--overwrite] [--print-cmd]
     if args.first == "--ending" {
         var paths: [String] = []
         var s = JobSettings()
@@ -920,6 +983,7 @@ func cliMain() {
             case "--out": outDir = need()
             case "--overwrite": s.overwrite = true
             case "--speed": s.speed = EncodeSpeed(rawValue: need().lowercased()) ?? .fast
+            case "--size": s.sizeMode = SizeMode(rawValue: need().lowercased()) ?? .match
             case "--print-cmd": printCmd = true
             case "--cover": coverArg = need()
             default: paths.append(a)

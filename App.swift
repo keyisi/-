@@ -605,6 +605,9 @@ struct InsertCoverView: View {
     @AppStorage("fxt_endVideos") private var endVideosRaw = ""
     @AppStorage("fxt_endCovers") private var endCoversRaw = ""
     @AppStorage("fxt_endLocked") private var endLocked = false
+    // 输出体积档位（与结尾处理共享同一设置）
+    @AppStorage("fxt_sizeMode") private var sizeMode = SizeMode.match.rawValue
+    private var currentSize: SizeMode { SizeMode(rawValue: sizeMode) ?? .match }
     private var videos: [String] { videosRaw.isEmpty ? [] : videosRaw.components(separatedBy: "\n") }
     private var covers: [String] { coversRaw.isEmpty ? [] : coversRaw.components(separatedBy: "\n") }
     @State private var running = false
@@ -662,6 +665,24 @@ struct InsertCoverView: View {
                 .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.1)))
                 .disabled(running || videos.isEmpty)
                 .help("打开输出文件夹")
+            }
+
+            // 2.6 输出体积
+            HStack(spacing: 10) {
+                FieldLabel("slider.horizontal.3", "输出体积")
+                Picker("", selection: $sizeMode) {
+                    ForEach(SizeMode.allCases, id: \.rawValue) { m in
+                        Text(m.label).tag(m.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 160)
+                .disabled(running)
+                Text(currentSize.hint)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                Spacer()
             }
 
             // 3. 匹配预览 / 日志
@@ -922,6 +943,7 @@ struct InsertCoverView: View {
     func insertCovers() {
         let list = videos
         let coverList = covers
+        let size = currentSize
         running = true
         stopping = false
         summary = ""
@@ -933,6 +955,7 @@ struct InsertCoverView: View {
             try? FileManager.default.createDirectory(atPath: customDir, withIntermediateDirectories: true)
         }
         logs = ["开始插入封面: \(list.count) 个视频, \(coverList.count) 张封面图" +
+                "，体积 \(size.label)" +
                 (customDir.isEmpty ? "" : "，输出到 \(customDir)")]
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -957,7 +980,8 @@ struct InsertCoverView: View {
                 let outDir = currentOutDir(for: video)
                 let cName = URL(fileURLWithPath: cover).lastPathComponent
                 let t0 = Date()
-                let ok = insertCoverToVideo(video, coverPath: cover, outputDir: outDir) { msg in
+                let ok = insertCoverToVideo(video, coverPath: cover, outputDir: outDir,
+                                            sizeMode: size) { msg in
                     DispatchQueue.main.async { logs.append("[\(vi+1)/\(list.count)] \(msg)") }
                 }
                 let used = Date().timeIntervalSince(t0)
@@ -1023,8 +1047,10 @@ struct EndingView: View {
     @AppStorage("fxt_endAFade") private var audioFadeOn = false
     @AppStorage("fxt_endAFadeDur") private var audioFadeDurText = "0.5"
     @AppStorage("fxt_endSpeed") private var encSpeed = EncodeSpeed.fast.rawValue
+    @AppStorage("fxt_sizeMode") private var sizeMode = SizeMode.match.rawValue
 
     private var currentSpeed: EncodeSpeed { EncodeSpeed(rawValue: encSpeed) ?? .fast }
+    private var currentSize: SizeMode { SizeMode(rawValue: sizeMode) ?? .match }
 
     private var videos: [String] { videosRaw.isEmpty ? [] : videosRaw.components(separatedBy: "\n") }
     private var covers: [String] { coversRaw.isEmpty ? [] : coversRaw.components(separatedBy: "\n") }
@@ -1077,6 +1103,7 @@ struct EndingView: View {
         s.sfxPath = sfxExists ? sfxPath : nil
         s.audioFade = audioFadeOn ? max(0.05, parseNum(audioFadeDurText, fallback: 0.5)) : 0
         s.speed = currentSpeed
+        s.sizeMode = currentSize
         return s
     }
 
@@ -1202,10 +1229,14 @@ struct EndingView: View {
                 }
             }
 
-            // 3.5 编码速度
+            // 3.5 编码
             Card {
-                FieldLabel("speedometer", "编码速度")
+                FieldLabel("slider.horizontal.3", "编码设置")
                 HStack(spacing: 10) {
+                    Text("速度")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32, alignment: .leading)
                     Picker("", selection: $encSpeed) {
                         ForEach(EncodeSpeed.allCases, id: \.rawValue) { sp in
                             Text(sp.label).tag(sp.rawValue)
@@ -1213,9 +1244,28 @@ struct EndingView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(width: 140)
+                    .frame(width: 120)
                     .disabled(running)
                     Text(currentSpeed.hint)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                HStack(spacing: 10) {
+                    Text("体积")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32, alignment: .leading)
+                    Picker("", selection: $sizeMode) {
+                        ForEach(SizeMode.allCases, id: \.rawValue) { m in
+                            Text(m.label).tag(m.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 160)
+                    .disabled(running)
+                    Text(currentSize.hint)
                         .font(.system(size: 10.5))
                         .foregroundStyle(.tertiary)
                     Spacer()
@@ -1450,6 +1500,7 @@ struct EndingView: View {
                 (s.audioFade > 0 ? "，原视频音频淡出 \(s.audioFade)秒" : "") +
                 (coverList.isEmpty ? "" : "，封面 \(coverList.count) 张按集数匹配") +
                 "，编码 \(s.speed.label)" +
+                "，体积 \(s.sizeMode.label)" +
                 (customDir.isEmpty ? "，输出到每个视频旁的「加结尾」文件夹" : "，输出到 \(customDir)")]
 
         DispatchQueue.global(qos: .userInitiated).async {
