@@ -68,19 +68,28 @@ struct ContentView: View {
             .padding(.top, 14)
             .padding(.bottom, 12)
 
-            if section == 0 {
-                ExtractView()
-            } else if section == 1 {
-                InsertCoverView()
-            } else if section == 2 {
-                EndingView()
-            } else {
-                OrganizerView()
+            // 四个板块常驻视图树（不销毁）：切换回来时已选文件/日志/预览全部保留
+            ZStack {
+                sectionLayer(0) { ExtractView() }
+                sectionLayer(1) { InsertCoverView() }
+                sectionLayer(2) { EndingView() }
+                sectionLayer(3) { OrganizerView() }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 780, maxWidth: .infinity, minHeight: 620, maxHeight: .infinity)
         .background(Theme.page)
         .preferredColorScheme(nil)
+    }
+
+    /// 板块图层：非当前板块只隐藏、不销毁，保证 @State（列表/日志/预览）不丢
+    @ViewBuilder
+    private func sectionLayer<Content: View>(_ tag: Int,
+                                             @ViewBuilder content: () -> Content) -> some View {
+        content()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .opacity(section == tag ? 1 : 0)
+            .allowsHitTesting(section == tag)
     }
 
     func tabButton(_ title: String, icon: String, tag: Int) -> some View {
